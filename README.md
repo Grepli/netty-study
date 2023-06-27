@@ -219,31 +219,90 @@ WaitSet ->> EntrySet:唤醒后重新进入EntrySet参与抢夺锁
 
 ## 线程池
 
+### 分类
+
 线程池有两种选择：
 
-- ScheduledThreadPoolExecutor
-- ThreadPoolExecutor
+- ScheduledThreadPoolExecutor：定时任务或周期性任务
+- ThreadPoolExecutor:一次性，立刻执行的任务
+
+### 参数
 
 线程池构造器：
 
 ```java
-public ThreadPoolExecutor(int corePoolSize, // 核心线程数
-                              int maximumPoolSize, // 最大线程数
-                              long keepAliveTime, // 线程保活时间
-                              TimeUnit unit, // 线程保活时间单位
-                              BlockingQueue<Runnable> workQueue) { // 等待队列
-        this(corePoolSize, maximumPoolSize, keepAliveTime, unit, workQueue,
-             Executors.defaultThreadFactory(), defaultHandler);
-    }
+public ThreadPoolExecutor(int corePoolSize,
+                              int maximumPoolSize,
+                              long keepAliveTime,
+                              TimeUnit unit,
+                              BlockingQueue<Runnable> workQueue,
+                              ThreadFactory threadFactory,
+                              RejectedExecutionHandler handler)
 ```
 
-关于参数，有给人很大的迷惑性，很长时间我都认为如果有线程池初始化时会默认初始化`corePoolSize个`线程，如果`corePoolSize`个线程处理不过来，线程数会增加到`maximunPoolSize`个，之后的任务会加入到`workQueue`中,其实不然：
-
-- corePoolSize：线程池主要用于执行任务的是核心线程，核心线程的数量是根据`corePoolSize`参数决定的。如果不进行特别的设定，线程池中始终会保持corePoolSize数量的线程数（不包括创建阶段）
+- corePoolSize：线程池主要用于执行任务的是核心线程，核心线程的数量是根据`corePoolSize`参数决定的。如果不进行特别的设定，线程池中始终会保持corePoolSize数量的线程数（不包括创建阶段）,值得注意的是，该参数是可以为0的，表示线程池中没有保持活动状态的线程。这意味着线程池不会自动创建线程来处理任务，而是在有任务提交时动态地创建线程来执行任务。
 - maximumPoolSize:一旦任务数量过多（由等待队列的特性决定），线程池将创建“非核心线程”临时帮助运行任务。设置的大于`corePoolSize`参数小于maximumPoolSize参数的部分，就是线程池可以临时创建的“非核心线程”的最大数量。这种情况下如果某个线程没有运行任何任务，在等待`keepAliveTime`时间后，这个线程将会被销毁，直到线程池的线程数量重新达到`corePoolSize`。
-- workQueue：`corePoolSize`个线程处理不过来的时候会将任务先加入到workQueue中
+- workQueue：`corePoolSize`个线程处理不过来的时候会将任务先加入到workQueue中，要求队列必须是`BlockingQueue`的实现类。具体有以下：
+  - 有界队列：
+    - SynchronousQueue：一个容量都没有的队列，只有前一个元素被移除了，后一个元素才可以加入，否则一直等待
+    - ArrayBlockingQueue：有界阻塞队列
+  - 无界队列(是有最大容量的，为Integer.MAX_VALUE)：
+    - LinkedBlockingQueue:可以指定容量，也可以不指定，指定容量后
+    - LinkedBlockingDeque：双端队列
+    - PriorityBlockingQueue：是一个按照优先级进行内部元素排序的无限队列，其任务要实现`Comparable`接口，可以通过该接口方法进行排序
+    - LinkedTransferQueue
 
 
+- threadFactory:线程工厂，如果没有指定，则会默认使用`Executors.defaultThreadFactory()`
+- RejectedExecutionHandler：拒绝策略，当提交一个任务给线程池，但是线程池无法被核心线程处理，无法加入到等待队列，也无法创建新的线程来处理；或者该线程池已经shutDown了，这个时候线程池会拒绝执行这个任务，然后触发指定的拒绝策略。拒绝策略应是实现`RejectedExecutionHandler`接口。已有：
+  - AbortPolicy：抛出异常
+  - CallerRunsPolicy：将任务交给调用者线程来执行，即谁交给我的，我再交还回去
+  - DiscardOldestPolicy：丢掉老的任务
+  - DiscardPolicy：默默丢掉
+
+### 流程
+
+关于参数，有给人很大的迷惑性，很长时间我都认为如果有线程池初始化时会默认初始化`corePoolSize个`线程，如果`corePoolSize`个线程处理不过来，线程数会增加到`maximunPoolSize`个，之后的任务会加入到`workQueue`中,其实线程池执行任务应如下所示：
+
+```mermaid
+graph LR
+线程池初始化-->|线程数为0|加入Runnable
+加入Runnable-->1{当前线程数是否大于核心数?}
+ 1{当前线程数是否大于核心数?}-->|小于| 创建线程执行任务
+ 1{当前线程数是否大于核心数?}-->|大于| 2{是否可以加入到workQueue中?}
+ 2{是否可以加入到workQueue中?} --> |Y| 加入到workQueue中
+ 2{是否可以加入到workQueue中?} --> |N| 3{当前线程数是否大于maximumPoolSize?}
+ 3{当前线程数是否大于maximumPoolSize?} --> |大于| 执行拒绝策略
+ 3{当前线程数是否大于maximumPoolSize?} --> |小于| 新建线程执行任务
+  
+ 
+```
+
+从上图可以看到线程池执行任务的流程
+
+不常用的参数:
+
+```java
+ThreadPoolExecutor threadPoolExecutor = new ThreadPoolExecutor(3,10,3L, TimeUnit.SECONDS,new LinkedBlockingQueue<>(100));
+// 允许核心线程也被回收,即线程池中所有线程都被回收
+threadPoolExecutor.allowCoreThreadTimeOut(true);
+// 预先初始化核心数个线程
+threadPoolExecutor.prestartAllCoreThreads();
+```
+
+### 扩展
+
+1. `shutdown()`，线程池收到该方法后，并不会立即停止，只是不会再接收任务了
+
+2. 有时候可以继承`ThreadPoolExecutor`，该类提供了三个钩子方法，本身只是空实现：
+
+   - beforeExecute：线程池执行每个任务之前会调用
+
+   - afterExecute:线程池执行每个任务结束后会调用
+
+   - terminated:线程池本身被关闭时被调用
+
+3. `execute(Runnable command)`该方法接收`Runnable`类型的参数，不支持返回，若要支持返回请使用`submit(Callable<T> task)`,这里提一下，该类还支持`Future<?> submit(Runnable task);`也支持`Runnable`参数，但是实际执行或者想要在钩子方法中获取这个`Runnable`，需要做一个额外处理，因为钩子方法本身的`Runnable`并不是你传入的，是使用适配器处理过的
 
 ## Future
 
